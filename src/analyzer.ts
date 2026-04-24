@@ -1,151 +1,134 @@
-import { getInstallationOctokit } from "./github.js";
-
-interface PRAnalysis {
-  changedFiles: FileChange[];
-  testPriority: TestPriority[];
-  diffCoverage: DiffCoverage[];
-}
-
-interface FileChange {
+export interface FileChange {
   filename: string;
   additions: number;
   deletions: number;
-  patch: string;
 }
 
-interface TestPriority {
+export interface TestPriority {
   testFile: string;
   /** P(catches regression | diff) / expected_runtime_seconds */
   infoGainPerSecond: number;
-  /** Historical pass rate for this test */
+  /** Historical pass rate (0-1). Lower = flakier */
   basePassRate: number;
-  /** Expected runtime in seconds */
+  /** Expected runtime in seconds (from history) */
   expectedRuntime: number;
   /** Which changed files this test covers */
   coversFiles: string[];
+  /** Historical fail rate when these files change */
+  failRateWhenFilesChange: number;
 }
 
-interface DiffCoverage {
+export interface DiffCoverage {
   filename: string;
   coveredByTests: string[];
-  status: "covered" | "uncovered" | "running";
+  status: "pending" | "running" | "passed" | "failed" | "uncovered";
 }
 
-interface AnalyzePRParams {
-  owner: string;
-  repo: string;
-  prNumber: number;
-  baseSha: string;
-  headSha: string;
-  installationId: number;
+export interface Analysis {
+  changedFiles: FileChange[];
+  priorityQueue: TestPriority[];
+  diffCoverage: DiffCoverage[];
+  totalChanges: number;
 }
 
-export async function analyzePR(params: AnalyzePRParams): Promise<PRAnalysis> {
-  const octokit = await getInstallationOctokit(params.installationId);
-
-  // Get the diff
-  const { data: compareData } = await octokit.rest.repos.compareCommits({
-    owner: params.owner,
-    repo: params.repo,
-    base: params.baseSha,
-    head: params.headSha,
-  });
-
-  const changedFiles: FileChange[] = (compareData.files || []).map((f) => ({
-    filename: f.filename,
-    additions: f.additions,
-    deletions: f.deletions,
-    patch: f.patch || "",
-  }));
-
-  // Map changed files to test files
-  // Phase 1: Convention-based mapping (spec/file_spec.rb ↔ app/file.rb)
-  // Phase 2: Historical correlation from test results DB
-  // Phase 3: LLM call graph analysis
-  const testPriority = mapChangesToTests(changedFiles);
-  const diffCoverage = computeDiffCoverage(changedFiles, testPriority);
-
-  return { changedFiles, testPriority, diffCoverage };
+export interface TestHistoryEntry {
+  testFile: string;
+  avgRuntime: number;
+  passRate: number;
+  /** Map of source file → fail rate when that file changes */
+  fileCorrelations: Record<string, number>;
+  totalRuns: number;
 }
 
-function mapChangesToTests(changedFiles: FileChange[]): TestPriority[] {
-  const testMap: Map<string, TestPriority> = new Map();
+export function analyzeDiff(
+  changedFiles: FileChange[],
+  history: TestHistoryEntry[],
+): Analysis {
+  const totalChanges = changedFiles.reduce((s, f) => s + f.additions + f.deletions, 0);
+  const historyMap = new Map(history.map(h => [h.testFile, h]));
+  const testMap = new Map<string, TestPriority>();
 
   for (const file of changedFiles) {
+    // Skip non-code files
+    if (file.filename.match(/\.(md|txt|yml|yaml|json|lock|toml)$/)) continue;
+
     const testFiles = findTestsForFile(file.filename);
+    const changeWeight = file.additions + file.deletions;
+
     for (const testFile of testFiles) {
+      const hist = historyMap.get(testFile);
       const existing = testMap.get(testFile);
+
+      const expectedRuntime = hist?.avgRuntime || 5;
+      const basePassRate = hist?.passRate || 0.95;
+      const failRate = hist?.fileCorrelations[file.filename] || 0.1;
+
+      // Information gain: how much does running this test reduce uncertainty?
+      // Higher fail correlation + faster runtime = more info per second
+      const infoGain = failRate * changeWeight / Math.max(0.1, expectedRuntime);
+
       if (existing) {
         existing.coversFiles.push(file.filename);
+        existing.infoGainPerSecond = Math.max(existing.infoGainPerSecond, infoGain);
+        existing.failRateWhenFilesChange = Math.max(existing.failRateWhenFilesChange, failRate);
       } else {
         testMap.set(testFile, {
           testFile,
-          // Phase 1: Heuristic scoring
-          // Files with more changes = higher probability of regression
-          infoGainPerSecond: (file.additions + file.deletions) / 10, // placeholder
-          basePassRate: 0.95, // default, will be replaced by historical data
-          expectedRuntime: 5, // default seconds, will be replaced by historical data
+          infoGainPerSecond: infoGain,
+          basePassRate,
+          expectedRuntime,
           coversFiles: [file.filename],
+          failRateWhenFilesChange: failRate,
         });
       }
     }
   }
 
-  // Sort by information gain per second (descending)
-  return Array.from(testMap.values()).sort(
-    (a, b) => b.infoGainPerSecond - a.infoGainPerSecond,
-  );
+  // Sort by information gain per second (highest first)
+  const priorityQueue = Array.from(testMap.values())
+    .sort((a, b) => b.infoGainPerSecond - a.infoGainPerSecond);
+
+  // Build diff coverage map
+  const coveredFiles = new Set(priorityQueue.flatMap(t => t.coversFiles));
+  const diffCoverage: DiffCoverage[] = changedFiles
+    .filter(f => !f.filename.match(/\.(md|txt|yml|yaml|json|lock|toml)$/))
+    .map(f => ({
+      filename: f.filename,
+      coveredByTests: priorityQueue
+        .filter(t => t.coversFiles.includes(f.filename))
+        .map(t => t.testFile),
+      status: coveredFiles.has(f.filename) ? "pending" as const : "uncovered" as const,
+    }));
+
+  return { changedFiles, priorityQueue, diffCoverage, totalChanges };
 }
 
 function findTestsForFile(filename: string): string[] {
-  // Convention-based mapping for Rails/RSpec
   const tests: string[] = [];
 
-  if (filename.startsWith("app/")) {
-    // app/models/user.rb → spec/models/user_spec.rb
-    // app/controllers/foo_controller.rb → spec/controllers/foo_controller_spec.rb
-    // app/services/foo_service.rb → spec/services/foo_service_spec.rb
-    const specFile = filename.replace("app/", "spec/").replace(/\.rb$/, "_spec.rb");
-    tests.push(specFile);
-
-    // Also check for request specs (E2E)
+  // Ruby/Rails conventions
+  if (filename.startsWith("app/") && filename.endsWith(".rb")) {
+    tests.push(filename.replace("app/", "spec/").replace(/\.rb$/, "_spec.rb"));
     if (filename.startsWith("app/controllers/")) {
-      const requestSpec = filename
-        .replace("app/controllers/", "spec/requests/")
-        .replace(/_controller\.rb$/, "_spec.rb");
-      tests.push(requestSpec);
+      tests.push(
+        filename.replace("app/controllers/", "spec/requests/").replace(/_controller\.rb$/, "_spec.rb"),
+      );
     }
   }
-
-  if (filename.startsWith("lib/")) {
-    const specFile = filename.replace("lib/", "spec/lib/").replace(/\.rb$/, "_spec.rb");
-    tests.push(specFile);
+  if (filename.startsWith("lib/") && filename.endsWith(".rb")) {
+    tests.push(filename.replace("lib/", "spec/lib/").replace(/\.rb$/, "_spec.rb"));
   }
 
-  // JS/TS files
-  if (filename.match(/\.(ts|tsx|js|jsx)$/)) {
-    const testFile = filename.replace(/\.(ts|tsx|js|jsx)$/, ".test.$1");
-    tests.push(testFile);
+  // TypeScript/JavaScript
+  if (filename.match(/\.(ts|tsx|js|jsx)$/) && !filename.includes(".test.") && !filename.includes(".spec.")) {
+    tests.push(filename.replace(/\.(ts|tsx|js|jsx)$/, ".test.$1"));
+    tests.push(filename.replace(/\.(ts|tsx|js|jsx)$/, ".spec.$1"));
+  }
+
+  // Go
+  if (filename.endsWith(".go") && !filename.endsWith("_test.go")) {
+    tests.push(filename.replace(/\.go$/, "_test.go"));
   }
 
   return tests;
-}
-
-function computeDiffCoverage(
-  changedFiles: FileChange[],
-  testPriority: TestPriority[],
-): DiffCoverage[] {
-  const coveredFiles = new Set(testPriority.flatMap((t) => t.coversFiles));
-
-  return changedFiles
-    .filter((f) => !f.filename.match(/\.(md|txt|yml|yaml|json)$/)) // skip non-code
-    .map((f) => ({
-      filename: f.filename,
-      coveredByTests: testPriority
-        .filter((t) => t.coversFiles.includes(f.filename))
-        .map((t) => t.testFile),
-      status: coveredFiles.has(f.filename)
-        ? ("covered" as const)
-        : ("uncovered" as const),
-    }));
 }

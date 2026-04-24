@@ -1,0 +1,12 @@
+name = "test-confidence"
+main = "src/worker.ts"
+compatibility_date = "2026-04-24"
+
+[vars]
+GITHUB_APP_ID = ""
+
+# Store historical test data in KV
+[[kv_namespaces]]
+binding = "HISTORY"
+id = ""
+preview_id = ""
