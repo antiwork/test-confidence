@@ -1,0 +1,17 @@
+# Test Confidence configuration
+# Place this file in your repo root
+
+# Global confidence threshold (stop when reached)
+threshold: 0.9999
+
+# Per-path overrides (higher-risk paths get higher thresholds)
+paths:
+  "app/billing/**": 0.99999
+  "app/payments/**": 0.99999
+  "app/models/purchase.rb": 0.99999
+  "app/models/user.rb": 0.9999
+  "app/controllers/**": 0.999
+  "app/services/**": 0.999
+  "lib/**": 0.999
+  "docs/**": 0.95
+  "app/admin/**": 0.99
