@@ -1,5 +1,4 @@
 import type { Env } from "./worker";
-import type { ConfidenceState } from "./engine";
 
 export class GitHubClient {
   private env: Env;
@@ -111,11 +110,15 @@ export class GitHubClient {
   async createCheckRun(
     owner: string, repo: string, sha: string,
     name: string, status: "in_progress" | "completed",
-    state: ConfidenceState,
+    state: { confidence: number; status: string; completedTests?: string[]; failedTests?: string[] },
   ) {
     const conclusion = status === "completed"
-      ? (state.confidence >= state.threshold ? "success" : "failure")
+      ? (state.status === "passing" ? "success" : "failure")
       : undefined;
+
+    const pct = (state.confidence * 100).toFixed(1);
+    const passed = state.completedTests?.length || 0;
+    const failed = state.failedTests?.length || 0;
 
     try {
       await this.api("POST", `/repos/${owner}/${repo}/check-runs`, {
@@ -124,10 +127,12 @@ export class GitHubClient {
         status,
         ...(conclusion ? { conclusion } : {}),
         output: {
-          title: `${(state.confidence * 100).toFixed(1)}% confidence`,
-          summary: state.confidence >= state.threshold
-            ? `✅ Reached ${(state.confidence * 100).toFixed(1)}% confidence after ${state.completed}/${state.total} tests (${state.elapsedSeconds.toFixed(0)}s). ${state.remaining} tests skipped.`
-            : `${state.completed}/${state.total} tests complete. Confidence: ${(state.confidence * 100).toFixed(1)}%`,
+          title: `${pct}% confidence`,
+          summary: state.status === "passing"
+            ? `✅ ${pct}% confidence after ${passed} tests.`
+            : state.status === "failing"
+            ? `❌ ${failed} test(s) failed.`
+            : `${pct}% confidence — ${passed} tests passed so far.`,
         },
       });
     } catch (err: any) {

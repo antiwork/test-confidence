@@ -1,28 +1,29 @@
 /**
- * AI-powered test ranking using Claude Opus 4.7.
- * Given a diff and list of test files, returns a ranked list of tests
- * most likely to catch regressions, with confidence weights.
+ * AI-powered test selection using Claude Opus.
+ * The LLM directly determines which tests are needed for each confidence tier.
  */
 
-interface RankedTest {
-  testFile: string;
-  weight: number; // 0-100, how likely this test catches a regression from this diff
+export interface TestWavePlan {
+  waves: Wave[];
+  totalTests: number;
+}
+
+export interface Wave {
+  targetConfidence: number; // e.g. 0.80, 0.95, 0.99, 0.9999
+  tests: string[];
   reason: string;
 }
 
-export async function rankTestsWithAI(
+export async function planTestWaves(
   diff: Array<{ filename: string; additions: number; deletions: number; patch?: string }>,
   allTestFiles: string[],
   apiKey: string,
-): Promise<RankedTest[]> {
+): Promise<TestWavePlan> {
   const diffSummary = diff.map(f => {
     return `${f.filename} (+${f.additions}/-${f.deletions})${f.patch ? `\n${f.patch.slice(0, 2000)}` : ""}`;
   }).join("\n\n");
 
-  // Cap test file list to avoid token overflow
-  const testFileList = allTestFiles.slice(0, 500).join("\n");
-
-  // Group test files by directory for better context
+  // Group test files by directory for context
   const testDirs = new Map<string, string[]>();
   for (const f of allTestFiles) {
     const dir = f.split("/").slice(0, -1).join("/");
@@ -34,19 +35,17 @@ export async function rankTestsWithAI(
     .map(([dir, files]) => `${dir}/\n${files.map(f => `  ${f}`).join("\n")}`)
     .join("\n");
 
-  const prompt = `You are a senior Rails engineer analyzing a code diff to determine which tests could catch regressions.
+  const prompt = `You are a senior Rails engineer planning a test execution strategy for a code change.
 
-This is a large Rails monolith (Gumroad). Think carefully about:
-1. DIRECT unit tests for changed files
-2. TRANSITIVE DEPENDENCIES: if User model changes, what other models/services/controllers use User? Those tests matter too.
-3. INTEGRATION tests (spec/requests/, spec/features/) that exercise code paths touching the changed files
-4. E2E/feature specs that cover user-facing flows affected by the change
-5. Controller specs for any endpoints that use the changed models/services
-6. Service specs that call into changed code
+Your job: determine the minimum tests needed at each confidence level that this diff doesn't introduce a regression.
 
-Be thorough. A change to a core model like User, Purchase, Link, or Subscription affects MANY tests. Include them.
+Think about it like this:
+- 80% confidence: "I'm pretty sure this is fine" — run the direct unit tests and closely related integration tests
+- 95% confidence: "This almost certainly works" — add broader integration tests, controller specs, and related feature tests  
+- 99% confidence: "I'd bet money on it" — add all tests that could conceivably be affected, including transitive dependencies
+- 99.99% confidence: "Mathematically certain" — run the entire test suite
 
-For a typical model change, you should identify 30-100+ relevant tests across unit, request, controller, feature, and service specs.
+The key insight: the FIRST few tests give you the MOST confidence because they directly test the changed code. Each subsequent wave has diminishing returns but increases certainty.
 
 ## Changed files with patches:
 ${diffSummary}
@@ -54,14 +53,41 @@ ${diffSummary}
 ## Test file tree (${allTestFiles.length} files):
 ${testTreeStr}
 
-Return a JSON array of objects:
-- "testFile": exact full path from the tree above
-- "weight": 0-100 (100 = direct unit test, 80 = integration test for this code path, 50 = tests code that depends on changed code, 20 = tangentially related)
-- "reason": one sentence
+Return a JSON object with this structure:
+{
+  "waves": [
+    {
+      "targetConfidence": 0.80,
+      "tests": ["spec/models/foo_spec.rb", ...],
+      "reason": "Direct unit tests for changed files and immediate dependencies"
+    },
+    {
+      "targetConfidence": 0.95,
+      "tests": ["spec/controllers/bar_spec.rb", ...],
+      "reason": "Integration and controller tests that exercise changed code paths"
+    },
+    {
+      "targetConfidence": 0.99,
+      "tests": ["spec/features/baz_spec.rb", ...],
+      "reason": "Broader feature tests and transitive dependency coverage"
+    },
+    {
+      "targetConfidence": 0.9999,
+      "tests": ["ALL_REMAINING"],
+      "reason": "Full suite for mathematical certainty"
+    }
+  ]
+}
 
-Include ALL tests with weight >= 10. Be generous. Err on the side of including too many rather than too few.
-Sort by weight descending.
-Return ONLY the JSON array, no markdown, no explanation.`;
+Rules:
+- Each wave's tests are ADDITIONAL (not cumulative). Wave 2 tests are only the NEW tests beyond wave 1.
+- Use exact file paths from the test tree above.
+- Wave 4 can use the special value "ALL_REMAINING" to mean all tests not in waves 1-3.
+- Be thorough in waves 1-2. These are the most important.
+- For a trivial change (docs, config), wave 1 alone might get to 95%.
+- For a core model change, wave 1 might need 30-50 tests.
+
+Return ONLY the JSON object, no markdown, no explanation.`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -80,7 +106,7 @@ Return ONLY the JSON array, no markdown, no explanation.`;
   if (!response.ok) {
     const text = await response.text();
     console.error(`Claude API error (${response.status}): ${text}`);
-    return [];
+    return { waves: [], totalTests: allTestFiles.length };
   }
 
   const data = await response.json() as {
@@ -90,26 +116,24 @@ Return ONLY the JSON array, no markdown, no explanation.`;
   const text = data.content?.[0]?.text || "";
 
   try {
-    // Extract JSON from response (handle markdown code blocks)
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.error("No JSON array found in Claude response:", text.slice(0, 200));
-      return [];
+      console.error("No JSON found in Claude response:", text.slice(0, 200));
+      return { waves: [], totalTests: allTestFiles.length };
     }
-    const ranked: RankedTest[] = JSON.parse(jsonMatch[0]);
+    const plan = JSON.parse(jsonMatch[0]) as TestWavePlan;
+    plan.totalTests = allTestFiles.length;
 
-    // Validate and normalize
-    return ranked
-      .filter(r => r.testFile && typeof r.weight === "number" && r.weight > 0)
-      .map(r => ({
-        testFile: r.testFile,
-        weight: Math.max(0, Math.min(100, r.weight)),
-        reason: r.reason || "",
-      }))
-      .sort((a, b) => b.weight - a.weight);
+    // Validate test file paths exist
+    const validFiles = new Set(allTestFiles);
+    for (const wave of plan.waves) {
+      wave.tests = wave.tests.filter(t => t === "ALL_REMAINING" || validFiles.has(t));
+    }
+
+    return plan;
   } catch (err: any) {
     console.error("Failed to parse Claude response:", err.message, text.slice(0, 200));
-    return [];
+    return { waves: [], totalTests: allTestFiles.length };
   }
 }
 
@@ -123,13 +147,11 @@ export async function getTestFileList(
   sha: string,
 ): Promise<string[]> {
   try {
-    // Get the full tree recursively
     const tree = await gh.api("GET", `/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`);
     const files = (tree.tree as Array<{ path: string; type: string }>)
       .filter(f => f.type === "blob")
       .map(f => f.path);
 
-    // Filter to test files
     return files.filter(f =>
       f.match(/_(spec|test)\.(rb|ts|tsx|js|jsx)$/) ||
       f.match(/\.(spec|test)\.(ts|tsx|js|jsx)$/) ||
