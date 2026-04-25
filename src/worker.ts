@@ -173,7 +173,11 @@ async function handlePR(ctx: Context) {
   await gh.createCheckRun(repo.owner.login, repo.name, pr.head.sha, "Test Confidence", "in_progress", state);
   console.log("Created check run");
 
-  // 7. If we have tests to run, trigger subset workflow
+  // 7. Store engine state FIRST (before triggering workflow, to avoid race)
+  await history.saveEngineState(pr.number, engine.serialize());
+  console.log(`Saved engine state for PR #${pr.number}`);
+
+  // 8. If we have tests to run, trigger subset workflow
   if (analysis.priorityQueue.length > 0) {
     const testFiles = analysis.priorityQueue
       .slice(0, engine.estimateTestsNeeded())
@@ -184,16 +188,11 @@ async function handlePR(ctx: Context) {
     console.log("Triggered test-subset workflow");
   } else {
     // No tests to run (config-only change, docs, etc.)
-    // Mark as high confidence immediately
     const noTestState = { ...state, confidence: 0.999, status: "passing" as const };
     await gh.postConfidenceComment(repo.owner.login, repo.name, pr.number, formatComment(noTestState));
     await gh.createCheckRun(repo.owner.login, repo.name, pr.head.sha, "Test Confidence", "completed", noTestState);
     console.log("No tests needed, marked as passing");
   }
-
-  // 8. Store engine state for webhook callbacks
-  await history.saveEngineState(pr.number, engine.serialize());
-  console.log(`Saved engine state for PR #${pr.number}`);
 }
 
 async function handleWorkflowJobComplete(ctx: Context) {
