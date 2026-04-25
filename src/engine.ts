@@ -112,12 +112,14 @@ export class BayesianEngine {
 
     // Confidence curve: fast start, then asymptotic approach to 100%
     // confidence = 1 - (1 - coverage)^k
-    // k controls how quickly confidence rises:
-    //   k=1: linear (confidence = coverage)
-    //   k=2: faster start
-    //   k=3: much faster start
-    // Use k=2 so 50% of tests ≈ 75% confidence, 90% ≈ 99%
-    const k = 2;
+    // k controls how quickly confidence rises.
+    // With k=4 and 3000 tests:
+    //   50 tests (1.7%)  → 6.5% confidence (Wave 1: AI)
+    //   500 tests (17%)  → 52% confidence (Wave 2)
+    //   1200 tests (40%) → 87% confidence (Wave 3)
+    //   2100 tests (70%) → 99.2% confidence (Wave 4)
+    //   2700 tests (90%) → 99.99% confidence (Wave 5)
+    const k = 4;
     const confidence = 1 - Math.pow(1 - coverage, k);
 
     this.pRegression = 1 - confidence;
