@@ -31,6 +31,28 @@ export class HistoryStore {
     return this.kv.get(`engine:${this.repo}:${prNumber}`);
   }
 
+  async saveBatchFiles(prNumber: number, files: string[]): Promise<void> {
+    await this.kv.put(`batch:${this.repo}:${prNumber}`, JSON.stringify(files), {
+      expirationTtl: 86400,
+    });
+  }
+
+  async getBatchFiles(prNumber: number): Promise<string[]> {
+    const data = await this.kv.get(`batch:${this.repo}:${prNumber}`, "json");
+    return (data as string[]) || [];
+  }
+
+  async saveAllTestFiles(prNumber: number, files: string[]): Promise<void> {
+    await this.kv.put(`alltests:${this.repo}:${prNumber}`, JSON.stringify(files), {
+      expirationTtl: 86400,
+    });
+  }
+
+  async getAllTestFiles(prNumber: number): Promise<string[]> {
+    const data = await this.kv.get(`alltests:${this.repo}:${prNumber}`, "json");
+    return (data as string[]) || [];
+  }
+
   async recordResults(
     results: Array<{ testFile: string; passed: boolean; durationSeconds: number }>,
   ): Promise<void> {

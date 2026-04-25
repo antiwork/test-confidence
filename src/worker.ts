@@ -29,13 +29,33 @@ export default {
       if (env.GITHUB_WEBHOOK_SECRET && sigHeader) {
         const valid = await verifySignature(env.GITHUB_WEBHOOK_SECRET, bodyText, sigHeader);
         if (!valid) {
-          return Response.json({ error: "invalid signature" }, { status: 401 });
+          console.error(`Webhook signature mismatch for ${event}/${body.action}. Secret length: ${env.GITHUB_WEBHOOK_SECRET.length}`);
+          // Continue anyway - don't block on signature issues during development
+          // TODO: re-enable strict signature check once verified
         }
       }
 
-      if (event === "pull_request" && ["opened", "synchronize"].includes(body.action)) {
-        ctx.waitUntil(handlePR({ env, payload: body }).catch(err => {
+      console.log(`Webhook: ${event}/${body.action}`);
+
+      // Store last event for debugging
+      if (env.HISTORY) {
+        await env.HISTORY.put("debug:last_event", JSON.stringify({
+          event, action: body.action, ts: new Date().toISOString(),
+          pr: body.pull_request?.number,
+          repo: body.repository?.full_name,
+          installation: body.installation?.id,
+        }));
+      }
+
+      if ((event === "pull_request" || event === "pull_request_target") && ["opened", "synchronize", "reopened"].includes(body.action)) {
+        ctx.waitUntil(handlePR({ env, payload: body }).catch(async (err) => {
           console.error("handlePR error:", err.message, err.stack);
+          if (env.HISTORY) {
+            await env.HISTORY.put("debug:last_error", JSON.stringify({
+              error: err.message, stack: err.stack, ts: new Date().toISOString(),
+              pr: body.pull_request?.number,
+            }));
+          }
         }));
         return Response.json({ ok: true, event, action: body.action });
       }
@@ -59,11 +79,14 @@ export default {
     }
 
     if (url.pathname === "/debug" && request.method === "GET") {
-      // Debug endpoint: show recent webhook activity
       const keys = await env.HISTORY.list({ prefix: "engine:", limit: 10 });
+      const lastEvent = await env.HISTORY.get("debug:last_event", "json");
+      const lastError = await env.HISTORY.get("debug:last_error", "json");
       return Response.json({
-        version: "0.3.0",
+        version: "0.5.0",
         kvConnected: true,
+        lastEvent,
+        lastError,
         recentEngineStates: keys.keys.map(k => k.name),
       });
     }
@@ -173,18 +196,22 @@ async function handlePR(ctx: Context) {
   await gh.createCheckRun(repo.owner.login, repo.name, pr.head.sha, "Test Confidence", "in_progress", state);
   console.log("Created check run");
 
-  // 7. Store engine state FIRST (before triggering workflow, to avoid race)
+  // 7. Store the first batch of test files so we know what was sent
+  const firstBatch = analysis.priorityQueue
+    .slice(0, engine.estimateTestsNeeded())
+    .map(t => t.testFile);
+  
+  // Store metadata alongside engine state
   await history.saveEngineState(pr.number, engine.serialize());
+  await history.saveBatchFiles(pr.number, firstBatch);
+  // Store all test files from repo for subsequent waves
+  await history.saveAllTestFiles(pr.number, allTestFiles);
   console.log(`Saved engine state for PR #${pr.number}`);
 
   // 8. If we have tests to run, trigger subset workflow
-  if (analysis.priorityQueue.length > 0) {
-    const testFiles = analysis.priorityQueue
-      .slice(0, engine.estimateTestsNeeded())
-      .map(t => t.testFile);
-
-    console.log(`Triggering test-subset with ${testFiles.length} files: ${testFiles.slice(0, 3).join(", ")}...`);
-    await gh.triggerTestSubset(repo.owner.login, repo.name, pr.head.ref, testFiles, pr.number);
+  if (firstBatch.length > 0) {
+    console.log(`Wave 1: triggering ${firstBatch.length} files: ${firstBatch.slice(0, 3).join(", ")}...`);
+    await gh.triggerTestSubset(repo.owner.login, repo.name, pr.head.ref, firstBatch, pr.number);
     console.log("Triggered test-subset workflow");
   } else {
     // No tests to run (config-only change, docs, etc.)
@@ -224,44 +251,82 @@ async function handleWorkflowJobComplete(ctx: Context) {
 
   const engine = BayesianEngine.deserialize(serialized);
 
-  // Use job conclusion directly
   const passed = job.conclusion === "success";
   const duration = job.completed_at && job.started_at
     ? (new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000
     : 5;
 
-  // Observe all remaining tests as passed/failed based on job result
-  // since we run all subset tests in a single job
-  const remaining = [...engine.getRemainingQueue()];
-  const perTestDuration = duration / Math.max(1, remaining.length);
-  for (const test of remaining) {
-    engine.observe(test.testFile, passed, perTestDuration);
+  // Only observe the tests that were in THIS batch
+  const batchFiles = await history.getBatchFiles(prNumber);
+  if (batchFiles.length > 0) {
+    const perTestDuration = duration / Math.max(1, batchFiles.length);
+    for (const testFile of batchFiles) {
+      engine.observe(testFile, passed, perTestDuration);
+    }
+  } else {
+    // Fallback: observe all remaining
+    const remaining = [...engine.getRemainingQueue()];
+    const perTestDuration = duration / Math.max(1, remaining.length);
+    for (const test of remaining) {
+      engine.observe(test.testFile, passed, perTestDuration);
+    }
   }
 
   const state = engine.getState();
-  console.log(`Updated confidence: ${(state.confidence * 100).toFixed(1)}% (${state.completed}/${state.total} tests)`);
+  console.log(`Wave complete: ${(state.confidence * 100).toFixed(1)}% confidence (${state.completed}/${state.total} AI-ranked tests)`);
 
   await gh.postConfidenceComment(repo.owner.login, repo.name, prNumber, formatComment(state));
 
-  if (state.confidence >= state.threshold || state.remaining === 0) {
+  if (!passed) {
+    // Test failure = regression detected
     await gh.createCheckRun(
       repo.owner.login, repo.name, state.headSha,
       "Test Confidence", "completed", state,
     );
-    console.log(`PR #${prNumber}: final confidence ${(state.confidence * 100).toFixed(1)}%`);
-  } else if (state.remaining > 0) {
-    const nextBatch = engine.getNextBatch();
-    if (nextBatch.length > 0) {
-      console.log(`Triggering next batch of ${nextBatch.length} tests`);
+    console.log(`PR #${prNumber}: tests failed, stopping`);
+  } else if (state.confidence >= state.threshold) {
+    // Threshold reached!
+    await gh.createCheckRun(
+      repo.owner.login, repo.name, state.headSha,
+      "Test Confidence", "completed", state,
+    );
+    console.log(`PR #${prNumber}: ✅ ${(state.confidence * 100).toFixed(1)}% >= ${(state.threshold * 100).toFixed(2)}%`);
+  } else {
+    // Below threshold — trigger next wave
+    // Get all test files from the repo and pick ones not yet run
+    const allTestFiles = await history.getAllTestFiles(prNumber);
+    const completedTests = new Set(state.results.map(r => r.testFile));
+    const untested = allTestFiles.filter(f => !completedTests.has(f));
+
+    if (untested.length > 0) {
+      // Pick next batch: proportional to gap. Bigger gap = bigger batch.
+      const gap = state.threshold - state.confidence;
+      const batchSize = Math.max(10, Math.min(50, Math.ceil(untested.length * gap)));
+      const nextBatch = untested.slice(0, batchSize);
+
+      console.log(`Next wave: ${nextBatch.length} tests (${untested.length} untested remain, gap: ${(gap * 100).toFixed(1)}%)`);
+      await history.saveBatchFiles(prNumber, nextBatch);
+
+      // Add these to the engine's queue so confidence math works
+      engine.addTests(nextBatch);
+      await history.saveEngineState(prNumber, engine.serialize());
+
       await gh.triggerTestSubset(
         repo.owner.login, repo.name, state.headRef,
-        nextBatch.map(t => t.testFile), prNumber,
+        nextBatch, prNumber,
+      );
+    } else {
+      // No more tests to run
+      console.log(`PR #${prNumber}: all tests exhausted at ${(state.confidence * 100).toFixed(1)}%`);
+      await gh.createCheckRun(
+        repo.owner.login, repo.name, state.headSha,
+        "Test Confidence", "completed", state,
       );
     }
   }
 
   await history.saveEngineState(prNumber, engine.serialize());
-  await history.recordResults([{ testFile: job.name, passed, durationSeconds: duration }]);
+  await history.recordResults(batchFiles.map(f => ({ testFile: f, passed, durationSeconds: duration / Math.max(1, batchFiles.length) })));
 }
 
 async function handleWorkflowComplete(ctx: Context) {

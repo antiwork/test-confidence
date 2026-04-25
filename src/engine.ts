@@ -153,6 +153,25 @@ export class BayesianEngine {
     return [...this.remainingQueue];
   }
 
+  /** Add new tests to the queue (for subsequent waves) */
+  addTests(testFiles: string[]) {
+    const existingFiles = new Set(this.analysis.priorityQueue.map(t => t.testFile));
+    for (const file of testFiles) {
+      if (existingFiles.has(file)) continue;
+      const entry: TestPriority = {
+        testFile: file,
+        infoGainPerSecond: 1, // Low weight for non-AI-ranked tests
+        basePassRate: 0.95,
+        expectedRuntime: 5,
+        coversFiles: [],
+        failRateWhenFilesChange: 0.01,
+      };
+      this.analysis.priorityQueue.push(entry);
+      this.remainingQueue.push(entry);
+      existingFiles.add(file);
+    }
+  }
+
   private estimateETA(): number {
     if (this.results.length === 0) {
       return this.remainingQueue.reduce((s, t) => s + t.expectedRuntime, 0);
