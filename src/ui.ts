@@ -20,15 +20,10 @@ export function formatComment(state: ConfidenceState): string {
   md += "```\n";
   md += `${bar} ${pct}%\n`;
   md += `${state.completed}/${state.total} tests passed`;
-  md += ` · ${state.elapsedSeconds.toFixed(0)}s elapsed`;
   if (state.remaining > 0) {
     md += ` · ${state.remaining} remaining`;
   }
   md += "\n";
-
-  if (state.etaSeconds > 0 && state.status === "running") {
-    md += `ETA ~${Math.ceil(state.etaSeconds)}s to ${targetPct}%\n`;
-  }
 
   md += "```\n\n";
 

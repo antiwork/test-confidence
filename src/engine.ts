@@ -113,13 +113,8 @@ export class BayesianEngine {
     const remaining = this.remainingQueue.length;
     const elapsed = this.results.reduce((s, r) => s + r.durationSeconds, 0);
 
-    // ETA: estimated time to reach threshold based on current convergence rate
-    const eta = this.estimateETA();
-
-    // Prediction accuracy from historical data
-    const accuracy = this.historicalAccuracy.length > 0
-      ? this.historicalAccuracy.reduce((s, a) => s + a, 0) / this.historicalAccuracy.length
-      : 0;
+    const eta = 0;
+    const accuracy = 0;
 
     const status = confidence >= this.threshold ? "passing"
       : remaining === 0 && this.results.some(r => !r.passed) ? "failing"
