@@ -331,11 +331,12 @@ function formatComment(state: PRState): string {
   }
 
   if (state.status === "passing") {
-    md += `**PASSED** — Reached ${pct}% confidence after ${totalPassed} tests.\n`;
+    md += `**PASSED** — ${pct}% confidence after ${totalPassed} tests.\n`;
   } else if (state.status === "failing") {
     md += `**FAILED** — ${totalFailed} test(s) failed.\n`;
   } else {
-    md += `**RUNNING** — Wave ${state.currentWave + 1} of ${state.plan.waves.length}\n`;
+    const waveNum = Math.min(state.currentWave + 1, state.plan.waves.length);
+    md += `**RUNNING** — Wave ${waveNum} of ${state.plan.waves.length}\n`;
   }
 
   return md;

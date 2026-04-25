@@ -86,6 +86,7 @@ Rules:
 - Be thorough in waves 1-2. These are the most important.
 - For a trivial change (docs, config), wave 1 alone might get to 95%.
 - For a core model change, wave 1 might need 30-50 tests.
+- Wave 3 (99%) MUST include E2E/feature specs (spec/features/ or spec/requests/) that exercise real user flows touching the changed code. This is non-negotiable. Even if the change seems isolated, include the closest E2E tests that exercise the affected code path end-to-end.
 
 Return ONLY the JSON object, no markdown, no explanation.`;
 
