@@ -141,6 +141,11 @@ export class BayesianEngine {
     return this.remainingQueue.slice(0, this.batchSize);
   }
 
+  /** Get all remaining tests */
+  getRemainingQueue(): TestPriority[] {
+    return [...this.remainingQueue];
+  }
+
   private estimateETA(): number {
     if (this.results.length === 0) {
       return this.remainingQueue.reduce((s, t) => s + t.expectedRuntime, 0);

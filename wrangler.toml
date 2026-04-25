@@ -3,10 +3,8 @@ main = "src/worker.ts"
 compatibility_date = "2026-04-24"
 
 [vars]
-GITHUB_APP_ID = ""
+GITHUB_APP_ID = "3495538"
 
-# Store historical test data in KV
 [[kv_namespaces]]
 binding = "HISTORY"
-id = ""
-preview_id = ""
+id = "0dbccc6d6fc6416ab3930f6fef1c4ce4"
