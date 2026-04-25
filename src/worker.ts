@@ -132,6 +132,12 @@ async function handlePR(env: Env, payload: Record<string, any>) {
   const allTestFiles = await getTestFileList(gh, repo.owner.login, repo.name, pr.head.sha);
   console.log(`PR #${pr.number}: ${allTestFiles.length} test files in repo`);
 
+  // Skip repos with no test files
+  if (allTestFiles.length === 0) {
+    console.log(`PR #${pr.number}: no test files found, skipping`);
+    return;
+  }
+
   // Ask Claude to plan the waves
   const plan = await planTestWaves(diff, allTestFiles, env.ANTHROPIC_API_KEY);
   console.log(`PR #${pr.number}: ${plan.waves.length} waves planned`);
@@ -170,7 +176,7 @@ async function handlePR(env: Env, payload: Record<string, any>) {
     const wave = plan.waves[0];
     const tests = resolveWaveTests(wave, state);
     console.log(`PR #${pr.number}: triggering wave 1 with ${tests.length} tests`);
-    await gh.triggerTestSubset(repo.owner.login, repo.name, pr.head.ref, tests, pr.number);
+    await gh.triggerTestSubset(repo.owner.login, repo.name, pr.head.ref, tests, pr.number, pr.head.sha);
     // Store which tests are in this batch
     await env.HISTORY.put(`batch:${pr.number}`, JSON.stringify(tests), { expirationTtl: 86400 });
   } else {
@@ -253,7 +259,7 @@ async function handleWaveComplete(env: Env, payload: Record<string, any>) {
     console.log(`PR #${prNumber}: triggering wave ${state.currentWave + 1} (target ${(nextWave.targetConfidence * 100).toFixed(0)}%) with ${tests.length} tests`);
     await env.HISTORY.put(`batch:${prNumber}`, JSON.stringify(tests), { expirationTtl: 86400 });
     await savePRState(env.HISTORY, state);
-    await gh.triggerTestSubset(state.owner, state.repo, state.headRef, tests, prNumber);
+    await gh.triggerTestSubset(state.owner, state.repo, state.headRef, tests, prNumber, state.headSha);
   } else {
     // All waves complete
     state.status = "passing";
