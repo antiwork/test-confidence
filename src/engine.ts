@@ -58,10 +58,9 @@ export class BayesianEngine {
       }
     }
 
-    // Prior: P(regression) based on diff size
-    // Base rate ~15%, scaled by log of total changes
-    const logScale = 1 + Math.log10(Math.max(1, analysis.totalChanges / 10));
-    this.pRegression = Math.min(0.5, 0.15 * logScale);
+    // Prior: start at 0% confidence (100% uncertain / assume regression)
+    // Confidence grows as tests pass. 100% = full test suite passed.
+    this.pRegression = 1.0;
   }
 
   observe(testFile: string, passed: boolean, durationSeconds: number) {
@@ -72,19 +71,32 @@ export class BayesianEngine {
     this.remainingQueue = this.remainingQueue.filter(t => t.testFile !== testFile);
 
     if (passed) {
-      // Bayes update: P(reg | pass) = P(pass|reg) * P(reg) / P(pass)
-      const pPassNoReg = test.basePassRate;
-      const detectionPower = Math.min(0.9, test.failRateWhenFilesChange);
-      const pPassReg = test.basePassRate * (1 - detectionPower);
-      const pPass = pPassNoReg * (1 - this.pRegression) + pPassReg * this.pRegression;
-      this.pRegression = (pPassReg * this.pRegression) / pPass;
+      // Each passing test contributes confidence proportional to its
+      // relevance to the diff. High-priority tests (directly covering
+      // changed files) contribute more than low-priority ones.
+      //
+      // Model: confidence = fraction of total "evidence weight" collected.
+      // A test's weight = its infoGainPerSecond (set by analyzer based on
+      // file correlation, change size, historical fail rate).
+      //
+      // After all tests pass, confidence = 100%.
+      // The AI prioritization front-loads high-weight tests so confidence
+      // rises fast early, then slows as we run less relevant tests.
+      //
+      // We track this via pRegression: the remaining uncertainty.
+      const totalWeight = this.analysis.priorityQueue.reduce((s, t) => s + t.infoGainPerSecond, 0);
+      const testWeight = test.infoGainPerSecond;
+      const fraction = totalWeight > 0 ? testWeight / totalWeight : 1 / this.analysis.priorityQueue.length;
+
+      // Reduce remaining uncertainty by this test's fraction
+      this.pRegression *= (1 - fraction);
     } else {
-      // Failure: strong evidence of regression
-      const pFailReg = Math.max(0.5, test.failRateWhenFilesChange);
-      const pFailNoReg = 1 - test.basePassRate; // flakiness
-      const pFail = pFailNoReg * (1 - this.pRegression) + pFailReg * this.pRegression;
-      this.pRegression = (pFailReg * this.pRegression) / pFail;
+      // Failure: strong evidence of regression. Spike uncertainty.
+      this.pRegression = Math.min(1.0, this.pRegression + 0.5);
     }
+
+    // Clamp
+    this.pRegression = Math.max(0, Math.min(1, this.pRegression));
 
     // Update diff coverage status
     const statuses = passed ? "passed" : "failed";

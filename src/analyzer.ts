@@ -63,9 +63,23 @@ export function analyzeDiff(
       const basePassRate = hist?.passRate || 0.95;
       const failRate = hist?.fileCorrelations[file.filename] || 0.1;
 
-      // Information gain: how much does running this test reduce uncertainty?
-      // Higher fail correlation + faster runtime = more info per second
-      const infoGain = failRate * changeWeight / Math.max(0.1, expectedRuntime);
+      // Tier the relevance:
+      //   Direct unit test (same file path) = weight 10
+      //   Request/integration test = weight 5
+      //   Related by directory = weight 2
+      //   Everything else = weight 1
+      let relevance = 1;
+      const srcBase = file.filename.replace(/^app\//, "").replace(/\.rb$/, "");
+      const testBase = testFile.replace(/^spec\//, "").replace(/_spec\.rb$/, "");
+      if (srcBase === testBase) {
+        relevance = 10; // Direct unit test
+      } else if (testFile.includes("requests/") || testFile.includes("features/")) {
+        relevance = 5; // Integration test
+      } else if (testFile.split("/").slice(0, -1).join("/") === file.filename.replace("app/", "spec/").split("/").slice(0, -1).join("/")) {
+        relevance = 3; // Same directory
+      }
+
+      const infoGain = relevance * (1 + failRate) * Math.max(1, changeWeight) / Math.max(0.1, expectedRuntime);
 
       if (existing) {
         existing.coversFiles.push(file.filename);

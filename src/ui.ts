@@ -18,24 +18,16 @@ export function formatComment(state: ConfidenceState): string {
 
   let md = `## ${emoji} Test Confidence: ${pct}%\n\n`;
   md += "```\n";
-  md += `Confidence ${bar} ${pct}%\n`;
-
-  // Scale bar with markers
-  const markerPos = Math.round(state.threshold * barLen);
-  const leftDash = "─".repeat(Math.max(0, markerPos));
-  const rightDash = "─".repeat(Math.max(0, barLen - markerPos - 1));
-  md += ` ├${leftDash}┼${rightDash}┤\n`;
-
-  md += ` ${state.completed} tests · ${state.elapsedSeconds.toFixed(0)}s`;
-  md += `    target: ${targetPct}%\n`;
+  md += `${bar} ${pct}%\n`;
+  md += `${state.completed}/${state.total} tests passed`;
+  md += ` · ${state.elapsedSeconds.toFixed(0)}s elapsed`;
+  if (state.remaining > 0) {
+    md += ` · ${state.remaining} remaining`;
+  }
+  md += "\n";
 
   if (state.etaSeconds > 0 && state.status === "running") {
-    md += ` ⏱ ETA to threshold: ~${Math.ceil(state.etaSeconds)}s`;
-    md += ` (${state.remaining} tests remaining)\n`;
-  }
-
-  if (state.predictionAccuracy > 0) {
-    md += ` 📊 Prediction accuracy: ${(state.predictionAccuracy * 100).toFixed(0)}% (last 30 runs)\n`;
+    md += `ETA ~${Math.ceil(state.etaSeconds)}s to ${targetPct}%\n`;
   }
 
   md += "```\n\n";
