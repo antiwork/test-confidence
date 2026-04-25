@@ -2,6 +2,7 @@ export interface FileChange {
   filename: string;
   additions: number;
   deletions: number;
+  patch?: string;
 }
 
 export interface TestPriority {

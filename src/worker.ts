@@ -2,6 +2,7 @@ export interface Env {
   GITHUB_APP_ID: string;
   GITHUB_PRIVATE_KEY: string;
   GITHUB_WEBHOOK_SECRET: string;
+  ANTHROPIC_API_KEY: string;
   HISTORY: KVNamespace;
 }
 
@@ -76,6 +77,7 @@ import { BayesianEngine } from "./engine";
 import { GitHubClient } from "./github";
 import { formatComment } from "./ui";
 import { HistoryStore } from "./history";
+import { rankTestsWithAI, getTestFileList } from "./ai";
 
 interface Context {
   env: Env;
@@ -107,7 +109,7 @@ async function handlePR(ctx: Context) {
 
   const history = new HistoryStore(ctx.env.HISTORY, repo.full_name);
 
-  // 1. Get the diff
+  // 1. Get the diff (with patches for AI analysis)
   console.log("Fetching PR diff...");
   const diff = await gh.getPRDiff(repo.owner.login, repo.name, pr.number);
   console.log(`Diff: ${diff.length} files changed`);
@@ -116,9 +118,44 @@ async function handlePR(ctx: Context) {
   const config = await gh.getRepoConfig(repo.owner.login, repo.name, pr.head.sha);
   console.log(`Config: threshold=${config.threshold}`);
 
-  // 3. Analyze diff → prioritized test list
+  // 3. Get full test file list from repo
+  const allTestFiles = await getTestFileList(gh, repo.owner.login, repo.name, pr.head.sha);
+  console.log(`Found ${allTestFiles.length} test files in repo`);
+
+  // 4. AI-powered test ranking with Claude Opus 4.7
+  let aiRanking: Array<{ testFile: string; weight: number; reason: string }> = [];
+  if (ctx.env.ANTHROPIC_API_KEY && allTestFiles.length > 0) {
+    console.log("Ranking tests with Claude Opus 4.7...");
+    aiRanking = await rankTestsWithAI(diff, allTestFiles, ctx.env.ANTHROPIC_API_KEY);
+    console.log(`AI ranked ${aiRanking.length} relevant tests`);
+  } else {
+    console.log("No Anthropic API key or no test files, falling back to rule-based analysis");
+  }
+
+  // 5. Merge AI ranking with rule-based analysis
   const histData = await history.getTestHistory();
   const analysis = analyzeDiff(diff, histData);
+
+  // If AI returned results, replace the priority queue with AI-ranked tests
+  if (aiRanking.length > 0) {
+    const aiQueue = aiRanking.map(r => ({
+      testFile: r.testFile,
+      infoGainPerSecond: r.weight, // Use AI weight directly
+      basePassRate: 0.95,
+      expectedRuntime: 5,
+      coversFiles: diff.map(f => f.filename),
+      failRateWhenFilesChange: r.weight / 100,
+    }));
+    analysis.priorityQueue = aiQueue;
+    // Update diff coverage with AI-identified tests
+    for (const dc of analysis.diffCoverage) {
+      dc.coveredByTests = aiRanking
+        .filter(r => r.weight > 20)
+        .map(r => r.testFile);
+      if (dc.coveredByTests.length > 0) dc.status = "pending";
+    }
+  }
+
   console.log(`Analysis: ${analysis.priorityQueue.length} tests prioritized, ${analysis.totalChanges} total changes`);
 
   // 4. Initialize Bayesian engine

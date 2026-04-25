@@ -45,7 +45,7 @@ export class GitHubClient {
     return this.token;
   }
 
-  private async api(method: string, path: string, body?: unknown): Promise<any> {
+  async api(method: string, path: string, body?: unknown): Promise<any> {
     const token = await this.getToken();
     const resp = await fetch(`https://api.github.com${path}`, {
       method,
@@ -71,11 +71,12 @@ export class GitHubClient {
   }
 
   async getPRDiff(owner: string, repo: string, prNumber: number) {
-    const data = await this.api("GET", `/repos/${owner}/${repo}/pulls/${prNumber}/files`);
+    const data = await this.api("GET", `/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100`);
     return (data as any[]).map((f: any) => ({
       filename: f.filename as string,
       additions: f.additions as number,
       deletions: f.deletions as number,
+      patch: (f.patch as string) || "",
     }));
   }
 
