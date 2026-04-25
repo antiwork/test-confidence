@@ -185,6 +185,7 @@ async function handlePR(ctx: Context) {
   const engine = new BayesianEngine(analysis, config, histData);
   engine.headSha = pr.head.sha;
   engine.headRef = pr.head.ref;
+  engine.totalTestsInRepo = allTestFiles.length;
 
   // 5. Post initial comment
   const state = engine.getState();
@@ -299,9 +300,13 @@ async function handleWorkflowJobComplete(ctx: Context) {
     const untested = allTestFiles.filter(f => !completedTests.has(f));
 
     if (untested.length > 0) {
-      // Pick next batch: proportional to gap. Bigger gap = bigger batch.
-      const gap = state.threshold - state.confidence;
-      const batchSize = Math.max(10, Math.min(50, Math.ceil(untested.length * gap)));
+      // Scale waves to reach 99.99% in ~4-5 waves.
+      // Each wave should roughly halve the remaining gap.
+      // Wave sizes: ~10% of total, ~20%, ~30%, then all remaining.
+      const totalTests = allTestFiles.length || untested.length;
+      const waveNumber = Math.floor(state.completed / Math.max(1, totalTests / 5)) + 1;
+      // Exponentially increasing batch sizes
+      const batchSize = Math.min(untested.length, Math.max(50, Math.ceil(totalTests * 0.15 * waveNumber)));
       const nextBatch = untested.slice(0, batchSize);
 
       console.log(`Next wave: ${nextBatch.length} tests (${untested.length} untested remain, gap: ${(gap * 100).toFixed(1)}%)`);

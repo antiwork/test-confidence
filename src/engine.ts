@@ -40,6 +40,7 @@ export class BayesianEngine {
   private batchSize = 10;
   private startTime = Date.now();
   private historicalAccuracy: number[];
+  totalTestsInRepo = 0;
   headSha = "";
   headRef = "";
 
@@ -58,45 +59,32 @@ export class BayesianEngine {
       }
     }
 
-    // Prior: start at 0% confidence (100% uncertain / assume regression)
-    // Confidence grows as tests pass. 100% = full test suite passed.
+    // Start at 0% confidence. Grows as tests pass.
+    // Model: each test that passes reduces remaining uncertainty.
+    // AI-ranked tests get their weight from Claude (0-100).
+    // Subsequent wave tests get equal share of remaining weight.
     this.pRegression = 1.0;
+    this.totalTestsInRepo = 0; // Set externally after construction
   }
 
   observe(testFile: string, passed: boolean, durationSeconds: number) {
     const test = this.analysis.priorityQueue.find(t => t.testFile === testFile);
-    if (!test) return;
+    if (!test) {
+      // Test not in priority queue (added in later wave)
+      this.results.push({ testFile, passed, durationSeconds });
+      if (!passed) this.pRegression = Math.min(1.0, this.pRegression + 0.5);
+      this.recalculateConfidence();
+      return;
+    }
 
     this.results.push({ testFile, passed, durationSeconds });
     this.remainingQueue = this.remainingQueue.filter(t => t.testFile !== testFile);
 
-    if (passed) {
-      // Each passing test contributes confidence proportional to its
-      // relevance to the diff. High-priority tests (directly covering
-      // changed files) contribute more than low-priority ones.
-      //
-      // Model: confidence = fraction of total "evidence weight" collected.
-      // A test's weight = its infoGainPerSecond (set by analyzer based on
-      // file correlation, change size, historical fail rate).
-      //
-      // After all tests pass, confidence = 100%.
-      // The AI prioritization front-loads high-weight tests so confidence
-      // rises fast early, then slows as we run less relevant tests.
-      //
-      // We track this via pRegression: the remaining uncertainty.
-      const totalWeight = this.analysis.priorityQueue.reduce((s, t) => s + t.infoGainPerSecond, 0);
-      const testWeight = test.infoGainPerSecond;
-      const fraction = totalWeight > 0 ? testWeight / totalWeight : 1 / this.analysis.priorityQueue.length;
-
-      // Reduce remaining uncertainty by this test's fraction
-      this.pRegression *= (1 - fraction);
-    } else {
-      // Failure: strong evidence of regression. Spike uncertainty.
+    if (!passed) {
       this.pRegression = Math.min(1.0, this.pRegression + 0.5);
     }
 
-    // Clamp
-    this.pRegression = Math.max(0, Math.min(1, this.pRegression));
+    this.recalculateConfidence();
 
     // Update diff coverage status
     const statuses = passed ? "passed" : "failed";
@@ -105,6 +93,34 @@ export class BayesianEngine {
         dc.status = statuses as any;
       }
     }
+  }
+
+  private recalculateConfidence() {
+    const passed = this.results.filter(r => r.passed).length;
+    const failed = this.results.filter(r => !r.passed).length;
+
+    if (failed > 0) {
+      // Any failure = low confidence
+      this.pRegression = 0.5 + 0.5 * (failed / (passed + failed));
+      return;
+    }
+
+    // Confidence model: how much of the test suite have we covered?
+    // Use totalTestsInRepo if known, otherwise estimate
+    const totalTests = this.totalTestsInRepo || Math.max(passed * 3, 1000);
+    const coverage = passed / totalTests;
+
+    // Confidence curve: fast start, then asymptotic approach to 100%
+    // confidence = 1 - (1 - coverage)^k
+    // k controls how quickly confidence rises:
+    //   k=1: linear (confidence = coverage)
+    //   k=2: faster start
+    //   k=3: much faster start
+    // Use k=2 so 50% of tests ≈ 75% confidence, 90% ≈ 99%
+    const k = 2;
+    const confidence = 1 - Math.pow(1 - coverage, k);
+
+    this.pRegression = 1 - confidence;
   }
 
   getState(): ConfidenceState {
@@ -207,6 +223,7 @@ export class BayesianEngine {
       historicalAccuracy: this.historicalAccuracy,
       headSha: this.headSha,
       headRef: this.headRef,
+      totalTestsInRepo: this.totalTestsInRepo,
     });
   }
 
@@ -222,6 +239,7 @@ export class BayesianEngine {
     engine.batchSize = 10;
     engine.headSha = parsed.headSha;
     engine.headRef = parsed.headRef;
+    engine.totalTestsInRepo = parsed.totalTestsInRepo || 0;
     return engine;
   }
 }
