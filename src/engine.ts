@@ -100,28 +100,44 @@ export class BayesianEngine {
     const failed = this.results.filter(r => !r.passed).length;
 
     if (failed > 0) {
-      // Any failure = low confidence
       this.pRegression = 0.5 + 0.5 * (failed / (passed + failed));
       return;
     }
 
-    // Confidence model: how much of the test suite have we covered?
-    // Use totalTestsInRepo if known, otherwise estimate
+    // Pareto model: AI-ranked tests carry disproportionate confidence.
+    //
+    // The LLM identified the tests most likely to catch regressions.
+    // Passing those tests IS the confidence signal. The rest is
+    // diminishing returns for mathematical certainty.
+    //
+    // We split confidence into two components:
+    //   1. AI coverage: what % of AI-ranked tests passed (0-80% of confidence)
+    //   2. Suite coverage: what % of full suite passed (0-20% of confidence)
+    //
+    // This means:
+    //   All AI tests pass (maybe 50 tests) = 80% confidence
+    //   + 50% of suite = 90% confidence  
+    //   + 90% of suite = 99% confidence
+    //   + 100% of suite = 100% confidence
+
+    const aiTests = this.analysis.priorityQueue.filter(t => t.infoGainPerSecond > 1);
+    const aiTotal = aiTests.length;
+    const aiPassed = aiTests.filter(t => 
+      this.results.some(r => r.testFile === t.testFile && r.passed)
+    ).length;
+
     const totalTests = this.totalTestsInRepo || Math.max(passed * 3, 1000);
-    const coverage = passed / totalTests;
+    const suiteCoverage = passed / totalTests;
 
-    // Confidence curve: fast start, then asymptotic approach to 100%
-    // confidence = 1 - (1 - coverage)^k
-    // k controls how quickly confidence rises.
-    // With k=4 and 3000 tests:
-    //   50 tests (1.7%)  → 6.5% confidence (Wave 1: AI)
-    //   500 tests (17%)  → 52% confidence (Wave 2)
-    //   1200 tests (40%) → 87% confidence (Wave 3)
-    //   2100 tests (70%) → 99.2% confidence (Wave 4)
-    //   2700 tests (90%) → 99.99% confidence (Wave 5)
-    const k = 4;
-    const confidence = 1 - Math.pow(1 - coverage, k);
+    // AI component: 80% of total confidence
+    const aiCoverage = aiTotal > 0 ? aiPassed / aiTotal : 0;
+    const aiConfidence = aiCoverage * 0.80;
 
+    // Suite component: 20% of total confidence, curved
+    // Use power curve so 50% suite = ~10%, 90% = ~18%, 100% = 20%
+    const suiteConfidence = (1 - Math.pow(1 - suiteCoverage, 3)) * 0.20;
+
+    const confidence = Math.min(1, aiConfidence + suiteConfidence);
     this.pRegression = 1 - confidence;
   }
 
