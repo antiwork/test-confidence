@@ -143,6 +143,7 @@ export class GitHubClient {
   async triggerTestSubset(
     owner: string, repo: string, ref: string,
     testFiles: string[], prNumber: number,
+    commitSha?: string,
   ) {
     try {
       await this.api("POST", `/repos/${owner}/${repo}/actions/workflows/test-subset.yml/dispatches`, {
@@ -151,6 +152,7 @@ export class GitHubClient {
           test_files: testFiles.join(","),
           pr_number: String(prNumber),
           run_name: `tc-pr-${prNumber}`,
+          commit_sha: commitSha || "",
         },
       });
     } catch (err: any) {
