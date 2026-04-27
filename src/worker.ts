@@ -163,9 +163,7 @@ async function handlePR(env: Env, payload: Record<string, any>) {
     status: "running",
   };
 
-  // Post initial comment
-  const comment = formatComment(state);
-  await gh.postConfidenceComment(repo.owner.login, repo.name, pr.number, comment);
+  // Create check run (no comment until first wave completes)
   await gh.createCheckRun(repo.owner.login, repo.name, pr.head.sha, "Test Confidence", "in_progress", state);
 
   // Save state
@@ -340,9 +338,8 @@ function formatComment(state: PRState): string {
     md += `**PASSED** — ${pct}% confidence after ${totalPassed} tests.\n`;
   } else if (state.status === "failing") {
     md += `**FAILED** — ${totalFailed} test(s) failed.\n`;
-  } else {
-    const waveNum = Math.min(state.currentWave + 1, state.plan.waves.length);
-    md += `**RUNNING** — Wave ${waveNum} of ${state.plan.waves.length}\n`;
+  } else if (totalRun > 0) {
+    md += `**RUNNING** — ${totalRun} tests complete, waiting for more results.\n`;
   }
 
   return md;
