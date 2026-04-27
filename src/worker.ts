@@ -311,6 +311,12 @@ function formatComment(state: PRState): string {
       }
 
       md += `${icon} **${target}** — ${testCount} — ${w.reason}\n`;
+      // Show test file names (not for ALL_REMAINING)
+      if (!w.tests.includes("ALL_REMAINING")) {
+        for (const t of w.tests) {
+          md += `    • \`${t}\`\n`;
+        }
+      }
     }
   }
 
