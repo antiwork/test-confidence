@@ -287,30 +287,15 @@ function resolveWaveTests(wave: Wave, state: PRState): string[] {
 function formatComment(state: PRState): string {
   const marker = "<!-- test-confidence -->";
   const pct = (state.confidence * 100).toFixed(1);
-  const barLen = 20;
-  const filled = Math.round(state.confidence * barLen);
-  const bar = "▓".repeat(filled) + "░".repeat(barLen - filled);
 
   const emoji = state.status === "passing" ? "🟢"
     : state.status === "failing" ? "🔴"
     : "⏳";
 
   let md = `${marker}\n## ${emoji} Test Confidence: ${pct}%\n\n`;
-  md += "```\n";
-  md += `${bar} ${pct}%\n`;
-
-  const totalPassed = state.completedTests.length;
-  const totalFailed = state.failedTests.length;
-  const totalRun = totalPassed + totalFailed;
-  md += `${totalPassed} tests passed`;
-  if (totalFailed > 0) md += ` · ${totalFailed} failed`;
-  md += "\n";
-
-  md += "```\n\n";
 
   // Wave progress
   if (state.plan.waves.length > 0) {
-    md += "**Waves**\n";
     for (let i = 0; i < state.plan.waves.length; i++) {
       const w = state.plan.waves[i];
       const target = `${(w.targetConfidence * 100).toFixed(0)}%`;
@@ -331,15 +316,11 @@ function formatComment(state: PRState): string {
 
       md += `${icon} **${target}** — ${testCount} — ${w.reason}\n`;
     }
-    md += "\n";
   }
 
-  if (state.status === "passing") {
-    md += `**PASSED** — ${pct}% confidence after ${totalPassed} tests.\n`;
-  } else if (state.status === "failing") {
-    md += `**FAILED** — ${totalFailed} test(s) failed.\n`;
-  } else if (totalRun > 0) {
-    md += `**RUNNING** — ${totalRun} tests complete, waiting for more results.\n`;
+  if (state.status === "failing") {
+    const totalFailed = state.failedTests.length;
+    md += `\n**FAILED** — ${totalFailed} test(s) failed.\n`;
   }
 
   return md;
