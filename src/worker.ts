@@ -288,11 +288,7 @@ function formatComment(state: PRState): string {
   const marker = "<!-- test-confidence -->";
   const pct = (state.confidence * 100).toFixed(1);
 
-  const emoji = state.status === "passing" ? "🟢"
-    : state.status === "failing" ? "🔴"
-    : "⏳";
-
-  let md = `${marker}\n## ${emoji} Test Confidence: ${pct}%\n\n`;
+  let md = `${marker}\n`;
 
   // Wave progress
   if (state.plan.waves.length > 0) {
