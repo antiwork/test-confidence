@@ -48,6 +48,36 @@ export default {
         return Response.json({ ok: true, event, action: body.action });
       }
 
+      // Handle full workflow run failure (e.g., Docker build fails before test jobs run)
+      if (event === "workflow_run" && body.action === "completed" && body.workflow_run?.conclusion === "failure") {
+        const runName = body.workflow_run?.name || "";
+        if (runName === "Test Subset") {
+          ctx.waitUntil((async () => {
+            const gh = new GitHubClient(env, body.installation?.id);
+            await gh.ensureAuth();
+            // Find the PR from the run name (tc-pr-XXXX)
+            const jobs = await gh.getWorkflowTestResults(body.repository.owner.login, body.repository.name, body.workflow_run.id);
+            for (const job of jobs) {
+              const match = job.testFile?.match(/tc-pr-(\d+)/);
+              if (match) {
+                const prNumber = parseInt(match[1], 10);
+                const state = await getPRState(env.HISTORY, body.repository.name, body.repository.owner.login, prNumber);
+                if (state && state.status === "running") {
+                  state.status = "failing";
+                  state.confidence = 0;
+                  await savePRState(env.HISTORY, state);
+                  await gh.postConfidenceComment(state.owner, state.repo, prNumber, formatComment(state));
+                  await gh.createCheckRun(state.owner, state.repo, state.headSha, "Test Confidence", "completed", state);
+                  console.log(`PR #${prNumber}: marked as failed due to workflow_run failure`);
+                }
+                break;
+              }
+            }
+          })().catch(err => console.error("workflow_run failure handler:", err.message)));
+          return Response.json({ ok: true, event, action: body.action });
+        }
+      }
+
       if (event === "workflow_job" && body.action === "completed") {
         ctx.waitUntil(handleWaveComplete(env, body).catch(async (err) => {
           console.error("handleWaveComplete error:", err.message, err.stack);
